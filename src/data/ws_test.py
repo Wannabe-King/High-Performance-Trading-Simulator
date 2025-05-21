@@ -12,4 +12,6 @@ async def handle_message(data):
 if __name__ == "__main__":
     ws_url = "wss://ws.gomarket-cpp.goquant.io/ws/l2-orderbook/okx/BTC-USDT-SWAP"
     manager = WebSocketManager(url=ws_url, on_message=handle_message)
-    manager.run()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(manager.run())
