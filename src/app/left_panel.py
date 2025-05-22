@@ -4,7 +4,12 @@ import tkinter as tk
 import asyncio
 from src.data.ws_backend import WebSocketManager
 from src.models.spillage import SlippageModel
+import time
+from datetime import datetime,timezone
 from tkinter import ttk
+from src.models.fee_model import FeeModel
+from src.models.maker_taker_model import MakerTakerModel
+from src.models.market_impact import MarketImpactModel
 import threading
 from src.config import (
     EXCHANGES,
@@ -24,6 +29,11 @@ class LeftPanel:
         self.slippage_model= SlippageModel()
         self.simulation_running = False  # New flag to track simulation state
         self.ws_manager = None
+        self.last_received_time = time.time()
+        self.fee_model = FeeModel()
+        self.maker_taker_model = MakerTakerModel()
+        self.impact_model = MarketImpactModel()
+
 
         # Exchange dropdown
         ttk.Label(self.frame, text="Exchange:").grid(row=0, column=0, sticky="w",pady=5)
@@ -146,6 +156,11 @@ class LeftPanel:
     def handle_orderbook_update(self, data):
         def update_ui():
             try:
+
+                now = time.time()
+                latency_ms = round((now - self.last_received_time) * 1000,2)
+                self.last_received_time = now
+
                 # Directly using "asks" and "bids" from data
                 if "asks" in data and "bids" in data:
                     bids = [(float(p), float(q)) for p, q in data["bids"][:10]]
@@ -157,8 +172,13 @@ class LeftPanel:
                 top_ask = asks[0][0]
                 mid_price = (top_bid + top_ask) / 2
                 spread_pct = (top_ask - top_bid) / mid_price * 100
-                total_bid_qty = sum(q for _, q in bids)
-                total_ask_qty = sum(q for _, q in asks)
+                # Calculate depths
+                bid_depth = sum(q for _, q in bids)
+                ask_depth = sum(q for _, q in asks)
+
+                # These are also used for imbalance and depth ratio
+                total_bid_qty = bid_depth
+                total_ask_qty = ask_depth
                 imbalance = total_bid_qty / (total_bid_qty + total_ask_qty)
                 depth_ratio = min(total_bid_qty, total_ask_qty) / max(total_bid_qty, total_ask_qty)
                 volatility = self.volatility_var.get() / 100
@@ -171,30 +191,46 @@ class LeftPanel:
                     "imbalance": imbalance,
                     "depth_ratio": depth_ratio,
                     "volatility": volatility,
+                    "bid_depth": bid_depth,
+                    "ask_depth": ask_depth,
+                    "order_type": self.order_type_var.get()
                 }
 
                 # --- Use slippage model ---
                 slippage = round(self.slippage_model.calculate(model_input), 4)
-
-                # --- Dummy values (replace if you have actual models later) ---
-                fees = round(quantity * 0.001, 4)  # example: 0.1% fee
-                impact = round(slippage * 0.5, 4)
+                # --- Use maker/taker model ---
+                order_type = self.order_type_var.get()  # Assuming you have a dropdown for "limit"/"market"
+                model_input["order_type"] = order_type
+                maker_proportion = self.maker_taker_model.predict(model_input)
+                # --- Use fee model ---
+                fees = round(self.fee_model.calculate(quantity, mid_price, maker_proportion), 4)
+                # --- Use market impact model ---
+                impact = round(
+                    self.impact_model.calculate(
+                        quantity=quantity,
+                        price=mid_price,
+                        volatility=model_input["volatility"],
+                        orderbook_data=model_input
+                    ),
+                    4
+                )
+                # --- Final net cost ---
                 net_cost = round(slippage + fees + impact, 4)
-                proportion = "50/50"  # Placeholder
-                latency = 42  # Placeholder
 
                 output_data = {
                     "Expected Slippage(%)": slippage,
                     "Expected Fees(USD)": fees,
                     "Market Impact(%)": impact,
                     "Net Cost(USD)": net_cost,
-                    "Maker/Taker Proportion(out of 100%)": proportion,
-                    "Internal Latency(ms)": latency
+                    "Maker/Taker Proportion(out of 100%)": f"{int(maker_proportion * 100)}/{int((1 - maker_proportion) * 100)}",
+                    "Internal Latency(ms)": latency_ms
                 }
 
                 self.output_panel.update(output_data)
             except Exception as e:
                 print(f"Error in update_ui: {e}")
+            
+
         
 
         self.frame.after(0, update_ui)
